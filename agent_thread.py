@@ -22,7 +22,7 @@ class AgentThread(QThread):
         api_key: str,
         *,
         mode: str = "browser",          # "browser" | "desktop"
-        model: str = "claude-sonnet-4-7",
+        model: str = "claude-sonnet-4-5-20250929",
         show_browser: bool = True,
         max_steps: int = 60,
         parent=None,

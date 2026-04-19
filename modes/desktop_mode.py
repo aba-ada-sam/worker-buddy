@@ -195,7 +195,7 @@ def run_desktop_task(
     *,
     task: str,
     api_key: str,
-    model: str = "claude-sonnet-4-7",
+    model: str = "claude-sonnet-4-5-20250929",
     max_steps: int = DEFAULT_MAX_STEPS,
     log_fn: Callable[[str], None] = print,
     is_stopped: Callable[[], bool] = lambda: False,

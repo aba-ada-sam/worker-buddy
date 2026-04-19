@@ -709,7 +709,7 @@ class MainWindow(QWidget):
             self._bubble("agent", f"Could not load credentials: {e}")
             return
 
-        model        = self.settings.value("model", "claude-sonnet-4-7")
+        model        = self.settings.value("model", "claude-sonnet-4-5-20250929")
         show_browser = self.settings.value("show_browser", True, type=bool)
         mode         = self.settings.value("mode", "browser")  # "browser" | "desktop"
         max_steps    = int(self.settings.value("desktop_max_steps", 60))

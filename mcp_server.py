@@ -150,7 +150,7 @@ def focus_window(title_substring: str) -> dict:
 # ── Higher-level: hand off a whole web task to browser-use ────────────────────
 
 @mcp.tool()
-def run_browser_task(task: str, model: str = "claude-sonnet-4-7", show_browser: bool = True) -> dict:
+def run_browser_task(task: str, model: str = "claude-sonnet-4-5-20250929", show_browser: bool = True) -> dict:
     """Run a self-contained web task end-to-end via the browser-use agent.
 
     Use this for multi-step browser work (log into a site, fill a form, scrape

@@ -12,7 +12,7 @@ Runs from the system tray.
 - **MCP server** — the same desktop primitives are exposed as MCP tools, so
   Claude Desktop / Claude Code / any MCP client can call them as tools.
 - Cooperative stop (no more `QThread.terminate()` orphaning the browser).
-- Default model bumped to `claude-sonnet-4-7`.
+- Default model bumped to `claude-sonnet-4-5-20250929`.
 
 ## Setup
 

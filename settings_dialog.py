@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox,
     QSlider, QLineEdit, QPushButton, QComboBox, QFileDialog,
-    QFrame, QWidget, QGraphicsDropShadowEffect
+    QFrame, QWidget, QGraphicsDropShadowEffect, QSpinBox
 )
 from PyQt5.QtCore import Qt, QSettings, QPoint
 from PyQt5.QtGui import QColor
@@ -15,9 +15,8 @@ TEXT_PRIMARY = "#ededf0"
 TEXT_DIM     = "#6e6e80"
 
 MODELS = [
-    "claude-sonnet-4-7",
+    "claude-sonnet-4-5-20250929",
     "claude-opus-4-7",
-    "claude-sonnet-4-6",
     "claude-opus-4-6",
     "claude-haiku-4-5-20251001",
 ]
@@ -112,6 +111,16 @@ QPushButton#close_btn {{
 }}
 QPushButton#close_btn:hover {{
     color: {TEXT_PRIMARY};
+}}
+QSpinBox {{
+    background-color: {BG_INPUT};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER_IDLE};
+    border-radius: 8px;
+    padding: 4px 8px;
+}}
+QSpinBox:focus {{
+    border: 1px solid {BORDER_FOCUS};
 }}
 """
 
@@ -229,6 +238,23 @@ class SettingsDialog(QDialog):
             self.model_combo.addItem(m)
         body.addWidget(self.model_combo)
 
+        # Desktop mode max steps
+        steps_lbl = QLabel("Desktop mode: max steps per task")
+        steps_lbl.setStyleSheet(f"color: {TEXT_DIM}; background: none; border: none;")
+        body.addWidget(steps_lbl)
+
+        steps_row = QHBoxLayout()
+        self.max_steps_spin = QSpinBox()
+        self.max_steps_spin.setRange(5, 300)
+        self.max_steps_spin.setSingleStep(5)
+        self.max_steps_spin.setValue(60)
+        self.max_steps_spin.setFixedWidth(90)
+        steps_row.addWidget(self.max_steps_spin)
+        steps_hint = QLabel("Runaway guard. Stop button still works at any time.")
+        steps_hint.setStyleSheet(f"color: {TEXT_DIM}; background: none; border: none; font-size: 11px;")
+        steps_row.addWidget(steps_hint, 1)
+        body.addLayout(steps_row)
+
         # Reset position
         reset_btn = QPushButton("Reset Window to Corner")
         reset_btn.setObjectName("reset_btn")
@@ -260,10 +286,11 @@ class SettingsDialog(QDialog):
         self.creds_edit.setText(
             self.settings.value("creds_path", r"C:\JSON Credentials\QB_WC_credentials.json")
         )
-        model = self.settings.value("model", "claude-sonnet-4-7")
+        model = self.settings.value("model", "claude-sonnet-4-5-20250929")
         idx = self.model_combo.findText(model)
         if idx >= 0:
             self.model_combo.setCurrentIndex(idx)
+        self.max_steps_spin.setValue(int(self.settings.value("desktop_max_steps", 60)))
 
     def _save(self):
         self.settings.setValue("always_on_top", self.aot_cb.isChecked())
@@ -273,6 +300,7 @@ class SettingsDialog(QDialog):
         if creds:
             self.settings.setValue("creds_path", creds)
         self.settings.setValue("model", self.model_combo.currentText())
+        self.settings.setValue("desktop_max_steps", self.max_steps_spin.value())
 
         if self.parent():
             self.parent().set_always_on_top(self.aot_cb.isChecked())
