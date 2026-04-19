@@ -1,10 +1,16 @@
-"""Browser mode -- delegates to the `browser-use` package.
+"""Browser mode -- delegates to the `browser-use` package (0.12+ API).
 
-This is the original Worker Buddy v1 logic, lifted out of agent_thread.py
-and parameterised so it can be driven by the new mode-dispatching thread.
-The agent runs to completion in one async call; we surface intermediate
-steps via a callback when browser-use exposes one, and fall back to a
-heartbeat otherwise.
+browser-use 0.12 overhauled their top-level API:
+- Browser / BrowserConfig were replaced with BrowserProfile + a session the
+  Agent spawns on demand. We pass a BrowserProfile for the headless flag.
+- LangChain integration is gone; the Agent expects a browser_use.llm.*
+  BaseChatModel. We use ChatLiteLLM which supports Anthropic via the
+  "anthropic/<model-id>" prefix.
+- Step callbacks now use typed fields: register_new_step_callback (sync)
+  for per-step events, register_done_callback (async) for completion.
+
+The outer sync signature (run_browser_task) is unchanged so the caller
+(agent_thread / MCP server) didn't have to care about the rewrite.
 """
 
 from __future__ import annotations
@@ -34,31 +40,56 @@ async def _heartbeat(stop_event: asyncio.Event, log_fn: Callable[[str], None]):
             idx += 1
 
 
-def _try_register_step_callback(agent, log_fn: Callable[[str], None]) -> bool:
-    """browser-use's step callback API name has shifted across versions; try
-    the known variants and report whether one stuck."""
+def _build_llm(model: str, api_key: str):
+    """Return a browser-use BaseChatModel bound to the Anthropic API."""
+    from browser_use.llm.litellm import ChatLiteLLM
+    # LiteLLM expects a provider-prefixed model id ("anthropic/...") so it
+    # knows which backend to hit. The model id we get is already the raw
+    # Anthropic id (e.g. claude-sonnet-4-5-20250929).
+    return ChatLiteLLM(
+        model=f"anthropic/{model}",
+        api_key=api_key,
+        max_tokens=4096,
+    )
 
-    def _emit(step, *args):
-        try:
-            action = getattr(step, "action", None) or getattr(step, "result", None)
-            msg = str(action)[:140] if action else str(step)[:140]
-        except Exception:
-            msg = str(step)[:140]
-        log_fn(msg)
 
-    for attr in ("register_new_step_callback", "on_step_done", "on_step"):
-        if not hasattr(agent, attr):
-            continue
+def _build_browser_profile(show_browser: bool):
+    """Optional browser config. Agent spawns a session from this on demand."""
+    try:
+        from browser_use.browser.profile import BrowserProfile
+    except Exception:
+        return None
+    try:
+        return BrowserProfile(headless=not show_browser)
+    except Exception as e:
+        log.debug("BrowserProfile(headless=...) failed: %s", e)
+        return None
+
+
+def _step_callback(log_fn: Callable[[str], None]):
+    """Per-step progress surface to the UI. browser-use 0.12 calls this with
+    (BrowserStateSummary, AgentOutput, step_number)."""
+    def _emit(state, output, step: int):
         try:
-            obj = getattr(agent, attr)
-            if callable(obj) and attr.startswith("register"):
-                obj(_emit)
-            else:
-                setattr(agent, attr, _emit)
-            return True
+            # AgentOutput has `action` (list of actions) and `current_state`.
+            msg = None
+            if hasattr(output, "action") and output.action:
+                first = output.action[0]
+                # Each action is a pydantic model with one field set to a params dict.
+                # The field name IS the action name (click_element, input_text, etc.).
+                try:
+                    dumped = first.model_dump(exclude_none=True, exclude_unset=True)
+                    if dumped:
+                        act_name = next(iter(dumped.keys()))
+                        msg = f"step {step}: {act_name}"
+                except Exception:
+                    msg = f"step {step}: {str(first)[:120]}"
+            if not msg:
+                msg = f"step {step}"
+            log_fn(msg)
         except Exception:
-            continue
-    return False
+            log_fn(f"step {step}")
+    return _emit
 
 
 def run_browser_task(
@@ -73,74 +104,71 @@ def run_browser_task(
     """Run one browser task (sync wrapper around the browser-use Agent).
 
     Returns the agent's final result string. The caller's stop flag is
-    polled via is_stopped(); when True, we shut the browser and exit.
+    polled via is_stopped(); when True, the Agent's should_stop callback
+    returns True on its next check and the Agent unwinds cleanly.
     """
 
     async def _run() -> str:
-        from langchain_anthropic import ChatAnthropic
         from browser_use import Agent
 
-        llm = ChatAnthropic(model=model, anthropic_api_key=api_key)
+        llm = _build_llm(model, api_key)
+        profile = _build_browser_profile(show_browser)
 
-        browser = None
-        try:
-            from browser_use import Browser, BrowserConfig
-            browser = Browser(config=BrowserConfig(headless=not show_browser))
-        except Exception:
-            # Older / newer browser-use versions handle Browser construction
-            # internally; the Agent will spawn one on demand if we omit it.
-            pass
+        log_fn(f"Browser agent starting (model={model}, headless={not show_browser})...")
 
-        log_fn("Browser agent starting...")
+        # browser-use 0.12's cooperative-stop hook is an async callback that
+        # returns True to stop. We translate the caller's sync is_stopped()
+        # here so the worker-thread flag propagates cleanly.
+        async def _should_stop() -> bool:
+            return bool(is_stopped())
 
-        agent_kwargs = {"task": task, "llm": llm}
-        if browser:
-            agent_kwargs["browser"] = browser
+        agent_kwargs = {
+            "task": task,
+            "llm": llm,
+            "register_new_step_callback": _step_callback(log_fn),
+            "register_should_stop_callback": _should_stop,
+        }
+        if profile is not None:
+            agent_kwargs["browser_profile"] = profile
+
         agent = Agent(**agent_kwargs)
 
         stop_event = asyncio.Event()
-        heartbeat_task = None
-        if not _try_register_step_callback(agent, log_fn):
-            heartbeat_task = asyncio.create_task(_heartbeat(stop_event, log_fn))
-
-        async def _watch_stop():
-            while not stop_event.is_set():
-                if is_stopped():
-                    log_fn("Stop requested -- closing browser.")
-                    if browser:
-                        try:
-                            await browser.close()
-                        except Exception:
-                            pass
-                    return
-                await asyncio.sleep(0.5)
-
-        watcher = asyncio.create_task(_watch_stop())
+        heartbeat_task = asyncio.create_task(_heartbeat(stop_event, log_fn))
 
         try:
-            result = await agent.run()
+            history = await agent.run()
         finally:
             stop_event.set()
-            if heartbeat_task:
-                try:
-                    await heartbeat_task
-                except Exception:
-                    pass
-            # Await the cancelled watcher so its CancelledError is consumed
-            # here rather than surfacing as a "Task was destroyed but it is
-            # pending" warning on the event loop's way out.
-            watcher.cancel()
             try:
-                await watcher
-            except (asyncio.CancelledError, Exception):
+                await heartbeat_task
+            except Exception:
                 pass
-            if browser:
+
+        # Try increasingly-coarse sources for a human-readable answer.
+        # 1. final_result() -- set by browser-use when the agent marks itself done
+        # 2. extracted_content() -- joined text of action results (almost always present)
+        # 3. str(history) -- last-ditch, truncated, for debugging
+        result = None
+        if history is not None:
+            try:
+                result = history.final_result()
+            except Exception:
+                result = None
+            if not result:
                 try:
-                    await browser.close()
+                    extracted = history.extracted_content()
+                    if extracted:
+                        # extracted_content is a list; keep the last meaningful entry.
+                        meaningful = [s for s in extracted if s and s.strip()]
+                        if meaningful:
+                            result = meaningful[-1]
                 except Exception:
                     pass
+        if not result:
+            result = str(history)[:400] if history else "Task completed"
 
-        result_str = str(result)[:400] if result else "Task completed"
+        result_str = str(result)[:600]
         log_fn(f"Result: {result_str}")
         return result_str
 
