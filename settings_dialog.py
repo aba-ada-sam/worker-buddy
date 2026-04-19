@@ -15,6 +15,8 @@ TEXT_PRIMARY = "#ededf0"
 TEXT_DIM     = "#6e6e80"
 
 MODELS = [
+    "claude-sonnet-4-7",
+    "claude-opus-4-7",
     "claude-sonnet-4-6",
     "claude-opus-4-6",
     "claude-haiku-4-5-20251001",
@@ -258,7 +260,7 @@ class SettingsDialog(QDialog):
         self.creds_edit.setText(
             self.settings.value("creds_path", r"C:\JSON Credentials\QB_WC_credentials.json")
         )
-        model = self.settings.value("model", "claude-sonnet-4-6")
+        model = self.settings.value("model", "claude-sonnet-4-7")
         idx = self.model_combo.findText(model)
         if idx >= 0:
             self.model_combo.setCurrentIndex(idx)

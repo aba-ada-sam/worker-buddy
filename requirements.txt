@@ -1,4 +1,19 @@
+# UI
 PyQt5
-browser-use
+
+# LLM
+anthropic
 langchain-anthropic
+
+# Browser mode
+browser-use
 playwright
+
+# Desktop mode
+mss
+pyautogui
+pywinauto
+pillow
+
+# MCP server (optional but recommended -- exposes desktop tools to Claude / IDEs)
+mcp

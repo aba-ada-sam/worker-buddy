@@ -98,6 +98,25 @@ class ChatHeader(QWidget):
         row.addLayout(col)
         row.addStretch()
 
+        # Mode chip — clickable to toggle Browser <-> Desktop
+        self.mode_chip = QPushButton("browser")
+        self.mode_chip.setFixedHeight(26)
+        self.mode_chip.setMinimumWidth(78)
+        self.mode_chip.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        self.mode_chip.setCursor(Qt.PointingHandCursor)
+        self.mode_chip.setToolTip("Click to switch between Browser and Desktop modes")
+        self.mode_chip.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.18);
+                color: white; border: 1px solid rgba(255,255,255,0.35);
+                border-radius: 12px; padding: 0 12px;
+                text-transform: uppercase; letter-spacing: 0.05em;
+            }
+            QPushButton:hover { background: rgba(255,255,255,0.32); }
+        """)
+        self.mode_chip.clicked.connect(lambda: self._main.toggle_mode())
+        row.addWidget(self.mode_chip)
+
         for text, slot in [("—", lambda: self._main.hide()), ("✕", lambda: self._main.hide())]:
             b = QPushButton(text)
             b.setFixedSize(32, 32)
@@ -116,6 +135,33 @@ class ChatHeader(QWidget):
 
     def set_status(self, text: str):
         self.sub_lbl.setText(text)
+
+    def set_mode(self, mode: str):
+        """Update the mode chip label/colour."""
+        m = mode if mode in ("browser", "desktop") else "browser"
+        self.mode_chip.setText(m)
+        # Browser = white-on-translucent (matches header). Desktop = warm tint
+        # so it's obvious you're handing the AI control of the whole machine.
+        if m == "desktop":
+            self.mode_chip.setStyleSheet("""
+                QPushButton {
+                    background: #FFB347; color: #2A1500;
+                    border: 1px solid #E89A2C; border-radius: 12px; padding: 0 12px;
+                    text-transform: uppercase; letter-spacing: 0.05em;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background: #FFC56E; }
+            """)
+        else:
+            self.mode_chip.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255,255,255,0.18);
+                    color: white; border: 1px solid rgba(255,255,255,0.35);
+                    border-radius: 12px; padding: 0 12px;
+                    text-transform: uppercase; letter-spacing: 0.05em;
+                }
+                QPushButton:hover { background: rgba(255,255,255,0.32); }
+            """)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -452,6 +498,29 @@ class MainWindow(QWidget):
         self._log_buffer.clear()
         self._bubble("status", combined)
 
+    # ── Mode (browser / desktop) ──────────────────────────────────────────────
+    def current_mode(self) -> str:
+        return self.settings.value("mode", "browser") or "browser"
+
+    def set_mode(self, mode: str):
+        if mode not in ("browser", "desktop"):
+            mode = "browser"
+        self.settings.setValue("mode", mode)
+        self.header.set_mode(mode)
+        # Keep the tray action group in sync if it exists yet.
+        for act in getattr(self, "_mode_actions", []):
+            act.setChecked(act.data() == mode)
+        # Update task input placeholder so the user knows what kind of task fits.
+        if mode == "desktop":
+            self.task_input.setPlaceholderText("Desktop task — e.g. \"Open Notepad and type today's date\"")
+        else:
+            self.task_input.setPlaceholderText("Browser task — e.g. \"Search for the iPhone 17 release date\"")
+
+    def toggle_mode(self):
+        new = "desktop" if self.current_mode() == "browser" else "browser"
+        self.set_mode(new)
+        self._bubble("status", f"Mode: {new.upper()}")
+
     # ── Tray ──────────────────────────────────────────────────────────────────
     def _build_tray(self):
         self.tray = QSystemTrayIcon(_make_tray_icon(ACCENT_SEND), self)
@@ -460,6 +529,22 @@ class MainWindow(QWidget):
         menu = QMenu()
         menu.addAction("Show / Hide", self._toggle_visible)
         menu.addAction("Clear Chat", self.chat.clear)
+        menu.addSeparator()
+
+        # Mode submenu
+        mode_menu = QMenu("Mode", menu)
+        mode_grp = QActionGroup(mode_menu)
+        self._mode_actions: list[QAction] = []
+        for label, val in [("Browser (web tasks)", "browser"), ("Desktop (any program)", "desktop")]:
+            a = QAction(label, mode_menu)
+            a.setCheckable(True)
+            a.setData(val)
+            a.setChecked(val == self.current_mode())
+            a.triggered.connect(lambda _c, v=val: self.set_mode(v))
+            mode_grp.addAction(a)
+            mode_menu.addAction(a)
+            self._mode_actions.append(a)
+        menu.addMenu(mode_menu)
         menu.addSeparator()
 
         self.aot_action = QAction("Always on Top", menu)
@@ -547,6 +632,9 @@ class MainWindow(QWidget):
         self.aot_action.setChecked(aot)
         self.setWindowOpacity(self.settings.value("opacity", 1.0, type=float))
 
+        # Apply persisted mode (also paints the chip + sets the placeholder)
+        self.set_mode(self.current_mode())
+
         last = self.settings.value("last_task", "")
         if last:
             self.task_input.setPlainText(last)
@@ -621,8 +709,10 @@ class MainWindow(QWidget):
             self._bubble("agent", f"Could not load credentials: {e}")
             return
 
-        model        = self.settings.value("model", "claude-sonnet-4-6")
+        model        = self.settings.value("model", "claude-sonnet-4-7")
         show_browser = self.settings.value("show_browser", True, type=bool)
+        mode         = self.settings.value("mode", "browser")  # "browser" | "desktop"
+        max_steps    = int(self.settings.value("desktop_max_steps", 60))
 
         self._bubble("user", task, attachments=attachments)
         self.task_input.clear()
@@ -630,7 +720,11 @@ class MainWindow(QWidget):
         self._set_running()
 
         from agent_thread import AgentThread
-        self._agent_thread = AgentThread(full_task, api_key, model, show_browser)
+        self._agent_thread = AgentThread(
+            full_task, api_key,
+            mode=mode, model=model,
+            show_browser=show_browser, max_steps=max_steps,
+        )
         self._agent_thread.log_line.connect(self.append_log)
         self._agent_thread.finished.connect(self._on_agent_finished)
         self._agent_thread.start()
