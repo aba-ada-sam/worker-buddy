@@ -55,6 +55,28 @@ def _ts() -> str:
     return t.lstrip("0") or t
 
 
+def _migrate_legacy_settings(settings: QSettings) -> None:
+    """One-time migration from the old "WorkerBuddy3" QSettings key.
+
+    v1 main.py and settings_dialog.py disagreed on the registry path -- the
+    main window wrote to \\LynnCove\\WorkerBuddy3, the dialog to
+    \\LynnCove\\WorkerBuddy. v2 standardizes on \\LynnCove\\WorkerBuddy, so
+    copy anything users had in the old location into the new one (without
+    overwriting values they've already set in the new one). Runs once per
+    install -- marked via the migrated_from_wb3 flag.
+    """
+    if settings.value("migrated_from_wb3", False, type=bool):
+        return
+    legacy = QSettings("LynnCove", "WorkerBuddy3")
+    if not legacy.allKeys():
+        settings.setValue("migrated_from_wb3", True)
+        return
+    for key in legacy.allKeys():
+        if not settings.contains(key):
+            settings.setValue(key, legacy.value(key))
+    settings.setValue("migrated_from_wb3", True)
+
+
 # ── Chat Header ───────────────────────────────────────────────────────────────
 class ChatHeader(QWidget):
     """Green WhatsApp-style title bar. Uses palette so the color is reliable."""
@@ -217,7 +239,8 @@ class AttachChip(QWidget):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.settings       = QSettings("LynnCove", "WorkerBuddy3")
+        self.settings       = QSettings("LynnCove", "WorkerBuddy")
+        _migrate_legacy_settings(self.settings)
         self._drag_pos      = None
         self._agent_thread  = None
         self._pending_files: list[str] = []
@@ -777,7 +800,14 @@ class MainWindow(QWidget):
             box.setDefaultButton(QMessageBox.No)
             if box.exec_() != QMessageBox.Yes:
                 return
-            self._agent_thread.terminate()
+            # Cooperative shutdown: signal the mode loop to stop and give it
+            # a few seconds to unwind (close the browser, cancel API call).
+            # Only hard-terminate as a last resort so we don't leave pyautogui
+            # mid-drag or Anthropic HTTP half-open.
+            self._agent_thread.request_stop()
+            if not self._agent_thread.wait(3000):
+                self._agent_thread.terminate()
+                self._agent_thread.wait(500)
         self._save_settings()
         QApplication.quit()
 
@@ -801,8 +831,21 @@ class MainWindow(QWidget):
                        self.height() - self.grip.height() - 4)
 
     def closeEvent(self, e):
+        # Close button hides to tray; persist current state in case the user
+        # then kills the process from Task Manager (otherwise they lose pos,
+        # size, and their in-progress task text).
+        self._save_settings()
         e.ignore()
         self.hide()
+
+    def hideEvent(self, e):
+        # Any hide (tray-toggle, window-hide, header — / ✕ buttons) also saves.
+        # Cheap -- just writes the current QSettings values.
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+        super().hideEvent(e)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

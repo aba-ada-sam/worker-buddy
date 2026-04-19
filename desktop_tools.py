@@ -39,6 +39,26 @@ def get_screen_info() -> ScreenInfo:
     return ScreenInfo(width=int(w), height=int(h))
 
 
+def get_model_display_size(max_dim: int = 1568) -> tuple[int, int, float]:
+    """What dimensions (and scale factor) a screenshot at max_dim would have.
+
+    Returns (model_width, model_height, scale) where
+        model_pixels = native_pixels * scale
+
+    Call this once at the start of a session to decide what display_width_px
+    / display_height_px to advertise to Claude's computer-use tool config.
+    The tool config needs to match the dimensions of the screenshots we
+    actually send so Claude's click coordinates are in the same space.
+    """
+    info = get_screen_info()
+    src_w, src_h = info.width, info.height
+    longest = max(src_w, src_h)
+    if longest > max_dim:
+        scale = max_dim / longest
+        return int(src_w * scale), int(src_h * scale), scale
+    return src_w, src_h, 1.0
+
+
 def take_screenshot(*, max_dim: int = 1568) -> dict:
     """Capture the primary monitor and return a base64 PNG.
 

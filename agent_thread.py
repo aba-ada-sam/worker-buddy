@@ -67,15 +67,17 @@ class AgentThread(QThread):
                     is_stopped=self._is_stopped,
                 )
         except Exception as e:
+            # Agent errors (API 4xx/5xx, network hiccups, tool crashes) bubble
+            # up as exceptions. A stop mid-flight may also raise, so prefer
+            # "stopped" classification when the user asked for it.
             if self._stop_requested:
                 self.finished.emit("stopped")
             else:
                 self.finished.emit(f"error: {e}")
             return
 
+        # Cooperative-stop sentinel from the mode loop.
         if self._stop_requested or result == "stopped":
             self.finished.emit("stopped")
-        elif isinstance(result, str) and result.startswith("error:"):
-            self.finished.emit(result)
         else:
             self.finished.emit("done")

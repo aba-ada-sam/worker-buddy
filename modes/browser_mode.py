@@ -126,7 +126,14 @@ def run_browser_task(
                     await heartbeat_task
                 except Exception:
                     pass
+            # Await the cancelled watcher so its CancelledError is consumed
+            # here rather than surfacing as a "Task was destroyed but it is
+            # pending" warning on the event loop's way out.
             watcher.cancel()
+            try:
+                await watcher
+            except (asyncio.CancelledError, Exception):
+                pass
             if browser:
                 try:
                     await browser.close()

@@ -94,9 +94,13 @@ def test_key_action(patched_dt):
     patched_dt["press_key"].assert_called_once_with("ctrl+s")
 
 
-def test_hold_key_falls_back_to_press(patched_dt):
-    dm._execute_computer_action({"action": "hold_key", "text": "shift"})
-    patched_dt["press_key"].assert_called_once_with("shift")
+def test_hold_key_uses_keyDown_not_press(patched_dt):
+    # hold_key must press-and-HOLD (via pyautogui.keyDown), not press-and-release.
+    # press_key would release immediately and break held-key-while-click flows.
+    with patch("pyautogui.keyDown") as kd:
+        dm._execute_computer_action({"action": "hold_key", "text": "shift"})
+    kd.assert_called_once_with("shift")
+    patched_dt["press_key"].assert_not_called()
 
 
 def test_wait_action(patched_dt):
@@ -168,7 +172,7 @@ def test_focus_window_routes_to_find_window():
 # ── tools list ───────────────────────────────────────────────────────────────
 
 def test_build_tools_includes_computer_and_custom():
-    tools = dm._build_tools()
+    tools = dm._build_tools(1920, 1080)
     types = [t.get("type") or t.get("name") for t in tools]
     assert "computer_20250124" in types
     assert "list_windows" in types

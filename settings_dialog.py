@@ -14,11 +14,13 @@ ACCENT_RUN   = "#5b5bd6"
 TEXT_PRIMARY = "#ededf0"
 TEXT_DIM     = "#6e6e80"
 
+# (model_id, label shown in dropdown). "(desktop)" tags are hints only; the
+# runtime does the real validation and falls back if needed.
 MODELS = [
-    "claude-sonnet-4-5-20250929",
-    "claude-opus-4-7",
-    "claude-opus-4-6",
-    "claude-haiku-4-5-20251001",
+    ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5  (browser + desktop)"),
+    ("claude-opus-4-7",            "Claude Opus 4.7  (browser only)"),
+    ("claude-opus-4-6",            "Claude Opus 4.6  (browser only)"),
+    ("claude-haiku-4-5-20251001",  "Claude Haiku 4.5  (browser only, fastest)"),
 ]
 
 _DIALOG_STYLE = f"""
@@ -234,8 +236,9 @@ class SettingsDialog(QDialog):
         body.addWidget(model_lbl)
 
         self.model_combo = QComboBox()
-        for m in MODELS:
-            self.model_combo.addItem(m)
+        for model_id, label in MODELS:
+            # Store the raw id as userData; show the friendly label in the list.
+            self.model_combo.addItem(label, userData=model_id)
         body.addWidget(self.model_combo)
 
         # Desktop mode max steps
@@ -287,7 +290,7 @@ class SettingsDialog(QDialog):
             self.settings.value("creds_path", r"C:\JSON Credentials\QB_WC_credentials.json")
         )
         model = self.settings.value("model", "claude-sonnet-4-5-20250929")
-        idx = self.model_combo.findText(model)
+        idx = self.model_combo.findData(model)
         if idx >= 0:
             self.model_combo.setCurrentIndex(idx)
         self.max_steps_spin.setValue(int(self.settings.value("desktop_max_steps", 60)))
@@ -299,7 +302,7 @@ class SettingsDialog(QDialog):
         creds = self.creds_edit.text().strip()
         if creds:
             self.settings.setValue("creds_path", creds)
-        self.settings.setValue("model", self.model_combo.currentText())
+        self.settings.setValue("model", self.model_combo.currentData())
         self.settings.setValue("desktop_max_steps", self.max_steps_spin.value())
 
         if self.parent():

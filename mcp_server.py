@@ -27,6 +27,9 @@ import base64
 import json
 import logging
 import os
+import threading
+import time
+import uuid
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -148,38 +151,168 @@ def focus_window(title_substring: str) -> dict:
 
 
 # ── Higher-level: hand off a whole web task to browser-use ────────────────────
+#
+# Browser tasks can take minutes. If we ran them synchronously inside the MCP
+# tool call, the client would sit blocked (and couldn't call any other tool
+# on this server) until the browser finished. Instead we spawn the task in a
+# background thread, hand back a job_id immediately, and expose status/result
+# tools the client can poll.
+
+_jobs_lock = threading.Lock()
+# job_id -> {"status": "running"|"done"|"error"|"stopped",
+#            "result": str, "error": str, "log": list[str],
+#            "stop_flag": bool, "thread": Thread, "started": float}
+_jobs: dict[str, dict] = {}
+_MAX_JOBS_RETAINED = 50
+_MAX_LOG_LINES = 120
+
+
+def _record(job_id: str, **updates) -> None:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        job.update(updates)
+
+
+def _job_log(job_id: str, line: str) -> None:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        lines = job.setdefault("log", [])
+        lines.append(line)
+        # Cap the log so a runaway agent can't balloon memory.
+        if len(lines) > _MAX_LOG_LINES:
+            del lines[: len(lines) - _MAX_LOG_LINES]
+    log.info("[browser %s] %s", job_id[:8], line)
+
+
+def _evict_old_jobs() -> None:
+    """Keep the jobs dict bounded. Drop finished entries older than the newest N."""
+    with _jobs_lock:
+        if len(_jobs) <= _MAX_JOBS_RETAINED:
+            return
+        # Sort by start time, keep the most-recent N.
+        ordered = sorted(_jobs.items(), key=lambda kv: kv[1].get("started", 0.0), reverse=True)
+        keep = dict(ordered[:_MAX_JOBS_RETAINED])
+        _jobs.clear()
+        _jobs.update(keep)
+
 
 @mcp.tool()
 def run_browser_task(task: str, model: str = "claude-sonnet-4-5-20250929", show_browser: bool = True) -> dict:
-    """Run a self-contained web task end-to-end via the browser-use agent.
+    """Start a browser-use agent in the background and return a job_id.
 
-    Use this for multi-step browser work (log into a site, fill a form, scrape
-    a page) where you don't want to drive each click from MCP. The browser
-    runs in its own Chromium window; final result text is returned.
+    Browser tasks can take minutes (login flows, multi-page navigation), so
+    this returns immediately with a job_id. Poll `browser_task_status(job_id)`
+    until status is "done" / "error" / "stopped", then call
+    `browser_task_result(job_id)` to retrieve the final answer and log.
 
-    The Anthropic key is read from settings:
-      1. ANTHROPIC_API_KEY env var, OR
-      2. C:\\JSON Credentials\\QB_WC_credentials.json -> "anthropic_key"
+    Args:
+        task:         plain-English description of the web task
+        model:        Claude model to use (default sonnet-4-5)
+        show_browser: False to run Chromium headless
+
+    Returns:
+        {"ok": True, "job_id": "..."} on success
+        {"ok": False, "error": "..."} if we can't start (no API key, etc.)
+
+    The Anthropic key is read from ANTHROPIC_API_KEY or
+    C:\\JSON Credentials\\QB_WC_credentials.json.
     """
     api_key = _load_anthropic_key()
     if not api_key:
         return {"ok": False, "error": "No Anthropic key (set ANTHROPIC_API_KEY or QB_WC_credentials.json)"}
 
-    log_lines: list[str] = []
-    def _log(line: str):
-        log_lines.append(line)
-        log.info("[browser] %s", line)
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "running",
+            "result": None,
+            "error": None,
+            "log": [],
+            "stop_flag": False,
+            "started": time.time(),
+            "task": task,
+        }
 
-    try:
-        from modes.browser_mode import run_browser_task as _run
-        result = _run(
-            task=task, api_key=api_key, model=model, show_browser=show_browser,
-            log_fn=_log, is_stopped=lambda: False,
-        )
-        return {"ok": True, "result": result, "log": log_lines[-30:]}
-    except Exception as e:
-        log.exception("run_browser_task failed")
-        return {"ok": False, "error": str(e), "log": log_lines[-30:]}
+    def _runner():
+        try:
+            from modes.browser_mode import run_browser_task as _run
+            result = _run(
+                task=task, api_key=api_key, model=model, show_browser=show_browser,
+                log_fn=lambda line: _job_log(job_id, line),
+                is_stopped=lambda: _jobs.get(job_id, {}).get("stop_flag", False),
+            )
+            final_status = "stopped" if _jobs.get(job_id, {}).get("stop_flag") else "done"
+            _record(job_id, status=final_status, result=result)
+        except Exception as e:
+            log.exception("browser job %s failed", job_id)
+            _record(job_id, status="error", error=str(e))
+
+    t = threading.Thread(target=_runner, name=f"browser-job-{job_id[:8]}", daemon=True)
+    _record(job_id, thread=t)
+    t.start()
+    _evict_old_jobs()
+    return {"ok": True, "job_id": job_id}
+
+
+@mcp.tool()
+def browser_task_status(job_id: str) -> dict:
+    """Check a background browser job's status.
+
+    Returns {"ok": True, "status": "running"|"done"|"error"|"stopped",
+             "elapsed_s": float, "log_tail": list[str]}.
+    Unknown job_ids come back with {"ok": False, "error": "..."}.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return {"ok": False, "error": f"unknown job_id: {job_id!r}"}
+        return {
+            "ok": True,
+            "status": job["status"],
+            "elapsed_s": round(time.time() - job.get("started", time.time()), 2),
+            "log_tail": list(job.get("log", []))[-12:],
+        }
+
+
+@mcp.tool()
+def browser_task_result(job_id: str) -> dict:
+    """Fetch the final result of a completed browser job.
+
+    Only meaningful when status != "running". The full log is returned so
+    the caller can inspect what happened; for long-running tasks this can be
+    sizeable but is capped at the last ~120 lines.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return {"ok": False, "error": f"unknown job_id: {job_id!r}"}
+        return {
+            "ok": job["status"] != "error",
+            "status": job["status"],
+            "result": job.get("result"),
+            "error": job.get("error"),
+            "log": list(job.get("log", [])),
+            "elapsed_s": round(time.time() - job.get("started", time.time()), 2),
+        }
+
+
+@mcp.tool()
+def browser_task_stop(job_id: str) -> dict:
+    """Cooperatively stop a running browser job.
+
+    Sets a flag the agent polls every ~500ms; the job will wrap up and
+    transition to status="stopped". Safe to call on an already-finished job.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return {"ok": False, "error": f"unknown job_id: {job_id!r}"}
+        job["stop_flag"] = True
+    return {"ok": True, "job_id": job_id, "message": "stop requested"}
 
 
 def _load_anthropic_key() -> str:
