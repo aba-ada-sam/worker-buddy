@@ -1,0 +1,47 @@
+name: tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+# Cancel an in-progress run on the same ref/PR when a new commit lands.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    # Worker Buddy is Windows-targeted (pywinauto, pyautogui+Win, mss).
+    # Running tests on a Windows runner mirrors what users actually hit.
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install minimum test dependencies
+        # The full requirements.txt pulls in playwright + Chromium + browser-use
+        # which are heavy and unnecessary for our pytest suite (we mock the
+        # I/O and only exercise pure-logic paths). Just install what tests
+        # actually import.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest PyQt5 mss pyautogui pywinauto pillow anthropic
+
+      - name: Run pytest
+        env:
+          # Qt needs an offscreen platform plugin on headless CI.
+          QT_QPA_PLATFORM: offscreen
+        run: pytest tests/ -q

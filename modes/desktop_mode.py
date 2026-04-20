@@ -67,6 +67,15 @@ COMPUTER_USE_MODELS = frozenset({
 # Fallback when a user has an incompatible model saved.
 _COMPUTER_USE_DEFAULT = "claude-sonnet-4-5-20250929"
 
+# Substring matches that trigger an approval prompt before execution. Lowercased
+# match against typed text and key combos. Conservative defaults; the chat UI
+# can extend these via QSettings.
+DEFAULT_DANGER_WORDS = (
+    "delete", "format", "send",  "transfer", "purchase", "pay ",
+    "drop table", "rm -rf", "rm /", "shutdown", "/restart",
+    "uninstall", "wipe", "factory reset", "wire $", "submit order",
+)
+
 
 class DesktopAgentError(Exception):
     """Wraps an API/tool error with a caller-visible reason."""
@@ -74,6 +83,35 @@ class DesktopAgentError(Exception):
 
 def supports_computer_use(model: str) -> bool:
     return model in COMPUTER_USE_MODELS
+
+
+def _action_summary(tu_input: dict) -> str:
+    """Compact human-readable summary of a `computer` tool_use input -- used
+    as the message body in the approval dialog and the danger-word scan."""
+    action = tu_input.get("action", "?")
+    bits = [action]
+    if tu_input.get("coordinate"):
+        bits.append(f"@ {tuple(tu_input['coordinate'])}")
+    text = tu_input.get("text")
+    if text is not None:
+        bits.append(repr(str(text)[:80]))
+    return " ".join(bits)
+
+
+def _looks_dangerous(action: str, tu_input: dict, danger_words: tuple) -> str | None:
+    """Return the matched danger phrase if this action looks destructive,
+    else None. Only `type` and `key` actions can carry payloads we'd worry
+    about; clicks/scrolls/screenshots are inherently safe to perform.
+    """
+    if action not in ("type", "key"):
+        return None
+    text = (tu_input.get("text") or "").lower()
+    if not text:
+        return None
+    for needle in danger_words:
+        if needle.lower() in text:
+            return needle
+    return None
 
 # Optional hand-off tool for window inspection -- gives Claude a way to ask
 # "what windows exist" before clicking blindly. Defined as a regular custom
@@ -313,6 +351,9 @@ def run_desktop_task(
     max_steps: int = DEFAULT_MAX_STEPS,
     log_fn: Callable[[str], None] = print,
     is_stopped: Callable[[], bool] = lambda: False,
+    usage_tracker=None,                       # usage.TaskUsage | None
+    approval_callback: Callable[[str], bool] | None = None,
+    danger_words: tuple = DEFAULT_DANGER_WORDS,
 ) -> str:
     """Run one desktop task to completion (or until stopped / max_steps).
 
@@ -325,6 +366,9 @@ def run_desktop_task(
     if not supports_computer_use(model):
         log_fn(f"Model {model!r} doesn't support Computer Use -- falling back to {_COMPUTER_USE_DEFAULT}.")
         model = _COMPUTER_USE_DEFAULT
+
+    if usage_tracker is not None and not getattr(usage_tracker, "model", ""):
+        usage_tracker.model = model
 
     client = anthropic.Anthropic(api_key=api_key)
 
@@ -367,6 +411,16 @@ def run_desktop_task(
             log_fn(f"API error: {e}")
             raise DesktopAgentError(str(e)) from e
 
+        # Roll up token usage so the chat can show a per-task cost summary.
+        if usage_tracker is not None and getattr(response, "usage", None):
+            u = response.usage
+            usage_tracker.add(
+                input_tokens=getattr(u, "input_tokens", 0) or 0,
+                output_tokens=getattr(u, "output_tokens", 0) or 0,
+                cache_creation_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0,
+                cache_read_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
+            )
+
         # Append assistant turn to history before processing tool uses.
         messages.append({"role": "assistant", "content": response.content})
 
@@ -401,6 +455,28 @@ def run_desktop_task(
                 if name == _TOOL_NAME:
                     action = tu_input.get("action", "")
                     log_fn(f"-> {action}{(' '+str(tu_input.get('coordinate'))) if tu_input.get('coordinate') else ''}{(' ' + repr(tu_input.get('text'))[:60]) if tu_input.get('text') else ''}")
+                    # Approval gate: if this action looks destructive AND a
+                    # callback is wired, ask the user before doing it. The
+                    # callback runs synchronously and returns True/False.
+                    if approval_callback is not None:
+                        triggered = _looks_dangerous(action, tu_input, danger_words)
+                        if triggered:
+                            summary = _action_summary(tu_input)
+                            log_fn(f"   ?  approval needed (matched {triggered!r}): {summary}")
+                            if not approval_callback(
+                                f"Worker Buddy wants to run a potentially destructive action:\n\n"
+                                f"  {summary}\n\n"
+                                f"Triggered by danger word: {triggered!r}\n\n"
+                                f"Allow?"
+                            ):
+                                log_fn("   ✗ user declined; reporting back to agent")
+                                results.append(_result_block_for_text(
+                                    tu_id,
+                                    {"ok": False, "error": "user declined this action; pick a safer alternative"},
+                                    is_error=True,
+                                ))
+                                continue
+                            log_fn("   ✓ user approved")
                     result = _execute_computer_action(tu_input, scale=scale)
                     if action == "screenshot" and "image_b64" in result:
                         results.append(_result_block_for_screenshot(tu_id, result))

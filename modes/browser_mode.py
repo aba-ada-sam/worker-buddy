@@ -60,16 +60,31 @@ def _build_llm(model: str, api_key: str):
     )
 
 
-def _build_browser_profile(show_browser: bool):
-    """Optional browser config. Agent spawns a session from this on demand."""
+def _build_browser_profile(show_browser: bool, user_data_dir: str | None = None):
+    """Optional browser config. Agent spawns a session from this on demand.
+
+    user_data_dir, if given, points Chromium at a persistent profile folder
+    so cookies / logins / extensions survive between tasks. Without it the
+    agent gets a fresh incognito-ish profile every run -- useless for
+    "check my Gmail" workflows.
+    """
     try:
         from browser_use.browser.profile import BrowserProfile
     except Exception:
         return None
+    kwargs: dict = {"headless": not show_browser}
+    if user_data_dir:
+        kwargs["user_data_dir"] = user_data_dir
     try:
-        return BrowserProfile(headless=not show_browser)
+        return BrowserProfile(**kwargs)
     except Exception as e:
-        log.debug("BrowserProfile(headless=...) failed: %s", e)
+        log.debug("BrowserProfile(%s) failed: %s", kwargs, e)
+        # Try again without user_data_dir if that's what's choking
+        if user_data_dir:
+            try:
+                return BrowserProfile(headless=not show_browser)
+            except Exception:
+                pass
         return None
 
 
@@ -107,6 +122,8 @@ def run_browser_task(
     show_browser: bool = True,
     log_fn: Callable[[str], None] = print,
     is_stopped: Callable[[], bool] = lambda: False,
+    usage_tracker=None,                   # usage.TaskUsage | None
+    user_data_dir: str | None = None,     # browser profile path for persistence
 ) -> str:
     """Run one browser task (sync wrapper around the browser-use Agent).
 
@@ -118,10 +135,59 @@ def run_browser_task(
     async def _run() -> str:
         from browser_use import Agent
 
-        llm = _build_llm(model, api_key)
-        profile = _build_browser_profile(show_browser)
+        if usage_tracker is not None and not getattr(usage_tracker, "model", ""):
+            usage_tracker.model = model
 
-        log_fn(f"Browser agent starting (model={model}, headless={not show_browser})...")
+        llm = _build_llm(model, api_key)
+        profile = _build_browser_profile(show_browser, user_data_dir=user_data_dir)
+
+        # Register a LiteLLM success callback so we capture token usage from
+        # every browser-use API call. LiteLLM doesn't expose this through its
+        # ChatLiteLLM wrapper, only through this global callback hook.
+        cb = None
+        if usage_tracker is not None:
+            try:
+                import litellm
+
+                def _capture_usage(kwargs, response, start_time, end_time):
+                    try:
+                        u = getattr(response, "usage", None)
+                        if u is None and isinstance(response, dict):
+                            u = response.get("usage")
+                        if u is None:
+                            return
+                        # u may be a pydantic model or a dict
+                        get = (lambda k: getattr(u, k, None)) if not isinstance(u, dict) else u.get
+                        usage_tracker.add(
+                            input_tokens=get("prompt_tokens") or 0,
+                            output_tokens=get("completion_tokens") or 0,
+                            cache_creation_tokens=(
+                                (get("cache_creation_input_tokens") or 0)
+                                if not isinstance(u, dict)
+                                else (u.get("cache_creation_input_tokens") or 0)
+                            ),
+                            cache_read_tokens=(
+                                (get("cache_read_input_tokens") or 0)
+                                if not isinstance(u, dict)
+                                else (u.get("cache_read_input_tokens") or 0)
+                            ),
+                        )
+                    except Exception:
+                        log.debug("usage capture callback failed", exc_info=True)
+
+                cb = _capture_usage
+                # success_callback is a list; append rather than overwrite so
+                # we don't stomp on whatever browser-use / litellm have wired.
+                if not isinstance(litellm.success_callback, list):
+                    litellm.success_callback = []
+                litellm.success_callback.append(cb)
+            except Exception:
+                log.debug("could not register litellm success_callback", exc_info=True)
+
+        log_fn(
+            f"Browser agent starting (model={model}, headless={not show_browser}"
+            f"{', persistent profile' if user_data_dir else ''})..."
+        )
 
         # browser-use 0.12's cooperative-stop hook is an async callback that
         # returns True to stop. We translate the caller's sync is_stopped()
@@ -151,6 +217,15 @@ def run_browser_task(
                 await heartbeat_task
             except Exception:
                 pass
+            # Detach the usage callback so back-to-back tasks don't
+            # double-count via stale callbacks left registered.
+            if cb is not None:
+                try:
+                    import litellm
+                    if cb in litellm.success_callback:
+                        litellm.success_callback.remove(cb)
+                except Exception:
+                    pass
 
         # Try increasingly-coarse sources for a human-readable answer.
         # 1. final_result() -- set by browser-use when the agent marks itself done

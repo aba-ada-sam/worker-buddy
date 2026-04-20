@@ -1,5 +1,7 @@
 import sys
 import json
+import logging
+import logging.handlers
 import os
 import urllib.request
 import urllib.error
@@ -9,6 +11,33 @@ from pathlib import Path
 # Project root -- used to locate bundled assets (icon.ico) regardless of cwd.
 _HERE = Path(__file__).resolve().parent
 _ICON_PATH = _HERE / "icon.ico"
+_LOG_DIR = _HERE / "logs"
+_LOG_FILE = _LOG_DIR / "worker-buddy.log"
+
+
+def _setup_logging() -> Path:
+    """Rotating file log + console mirror. Captures every module's logger,
+    including browser-use, anthropic, etc. Returns the log file path."""
+    _LOG_DIR.mkdir(exist_ok=True)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # Avoid duplicate handlers if main is re-imported (tests, dev reload).
+    for h in list(root.handlers):
+        if getattr(h, "_wb_marker", False):
+            return _LOG_FILE
+    fh = logging.handlers.RotatingFileHandler(
+        _LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    fh._wb_marker = True
+    root.addHandler(fh)
+    # Quiet down chatty libraries.
+    for noisy in ("LiteLLM", "httpx", "httpcore", "anthropic", "browser_use.telemetry"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    return _LOG_FILE
 
 __version__ = "1.0.0"
 from PyQt5.QtWidgets import (
@@ -633,6 +662,8 @@ class MainWindow(QWidget):
         menu.addMenu(op_menu)
         menu.addSeparator()
         menu.addAction("Settings...", self._open_settings)
+        menu.addAction("Usage...", self._show_usage)
+        menu.addAction("View Logs...", self._open_logs)
         menu.addAction("Check for Update", self._check_for_update)
         menu.addSeparator()
         menu.addAction("Exit", self.confirm_quit)
@@ -739,6 +770,29 @@ class MainWindow(QWidget):
         from settings_dialog import SettingsDialog
         SettingsDialog(self).exec_()
 
+    def _open_logs(self):
+        """Open the rotating log file in the default text viewer."""
+        if not _LOG_FILE.exists():
+            self.tray.showMessage("Worker Buddy", f"No log file yet at {_LOG_FILE}",
+                                  QSystemTrayIcon.Information, 4000)
+            return
+        try:
+            os.startfile(str(_LOG_FILE))  # Windows: opens in Notepad / default
+        except Exception as e:
+            self.tray.showMessage("Worker Buddy", f"Could not open log: {e}",
+                                  QSystemTrayIcon.Warning, 4000)
+
+    def _show_usage(self):
+        """Modal showing today/month/lifetime token spend."""
+        from usage import rollup_summary
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Worker Buddy -- API Usage")
+        box.setText("Anthropic API spend (recorded by Worker Buddy):")
+        box.setInformativeText(rollup_summary())
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec_()
+
     # ── Enter = send, Shift+Enter = newline ───────────────────────────────────
     def eventFilter(self, obj, event):
         if obj is self.task_input and event.type() == QEvent.KeyPress:
@@ -794,6 +848,15 @@ class MainWindow(QWidget):
         show_browser = self.settings.value("show_browser", True, type=bool)
         mode         = self.settings.value("mode", "browser")  # "browser" | "desktop"
         max_steps    = int(self.settings.value("desktop_max_steps", 60))
+        approvals    = self.settings.value("approvals_enabled", True, type=bool)
+        # Default to a per-project profile so logins persist between tasks.
+        default_profile = str(_HERE / "browser_profile")
+        browser_dir  = self.settings.value("browser_user_data_dir", default_profile)
+
+        # Optional user override of the danger-word list. Stored as comma-
+        # separated text; empty -> use the module default.
+        raw_words = (self.settings.value("desktop_danger_words", "") or "").strip()
+        danger_words: tuple = tuple(w.strip() for w in raw_words.split(",") if w.strip()) if raw_words else ()
 
         self._bubble("user", task, attachments=attachments)
         self.task_input.clear()
@@ -805,11 +868,47 @@ class MainWindow(QWidget):
             full_task, api_key,
             mode=mode, model=model,
             show_browser=show_browser, max_steps=max_steps,
+            approvals_enabled=approvals,
+            danger_words=danger_words,
+            browser_user_data_dir=browser_dir if mode == "browser" else None,
         )
         self._agent_thread.log_line.connect(self.append_log)
         self._agent_thread.finished.connect(self._on_agent_finished)
+        self._agent_thread.usage_ready.connect(self._on_usage_ready)
+        self._agent_thread.approval_request.connect(self._on_approval_request)
         self._agent_thread.start()
         self._flush_timer.start()
+
+    def _on_usage_ready(self, usage):
+        """Surface per-task token usage in the chat and roll into the ledger."""
+        try:
+            from usage import record
+            line = usage.summary_line()
+            self._bubble("status", line)
+            record(usage)
+        except Exception as e:
+            self._bubble("status", f"(could not record usage: {e})")
+
+    def _on_approval_request(self, message: str, setter):
+        """Show a Yes/No dialog from the worker thread's request and call
+        `setter(True/False)` so the worker unblocks. Runs on the main thread
+        because Qt queues cross-thread signal connections by default."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Worker Buddy -- Approval Required")
+        box.setText(message)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        # Bring chat to front so the user sees what's being asked.
+        if not self.isVisible():
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        approved = (box.exec_() == QMessageBox.Yes)
+        try:
+            setter(approved)
+        except Exception:
+            pass
 
     def _on_agent_finished(self, status: str):
         self._flush_timer.stop()
@@ -908,6 +1007,13 @@ class MainWindow(QWidget):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Logging first so import-time failures land somewhere we can read.
+    _setup_logging()
+    logging.getLogger("worker_buddy").info(
+        "Worker Buddy starting (Python %s, log -> %s)",
+        sys.version.split()[0], _LOG_FILE,
+    )
+
     # Enable HiDPI before creating the app
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)

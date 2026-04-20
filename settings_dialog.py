@@ -266,6 +266,31 @@ class SettingsDialog(QDialog):
         self.repo_edit.setPlaceholderText("e.g. aba-ada-sam/worker-buddy")
         body.addWidget(self.repo_edit)
 
+        # Browser session directory (so logins persist between tasks)
+        bdir_lbl = QLabel("Browser profile folder  (cookies / logins persist here)")
+        bdir_lbl.setStyleSheet(f"color: {TEXT_DIM}; background: none; border: none;")
+        body.addWidget(bdir_lbl)
+        self.browser_dir_edit = QLineEdit()
+        self.browser_dir_edit.setPlaceholderText(r"<project>\browser_profile (default)")
+        body.addWidget(self.browser_dir_edit)
+
+        # Approval gates (desktop mode)
+        self.approvals_cb = QCheckBox("Approve destructive desktop actions")
+        self.approvals_cb.setStyleSheet(f"color: {TEXT_PRIMARY}; background: none; border: none;")
+        self.approvals_cb.setToolTip(
+            "When the agent tries to type/press something matching a danger word, "
+            "pause and ask before executing."
+        )
+        body.addWidget(self.approvals_cb)
+
+        # Danger word list (comma-separated; blank = use built-in defaults)
+        words_lbl = QLabel("Danger words  (comma-separated; blank = built-in defaults)")
+        words_lbl.setStyleSheet(f"color: {TEXT_DIM}; background: none; border: none;")
+        body.addWidget(words_lbl)
+        self.danger_words_edit = QLineEdit()
+        self.danger_words_edit.setPlaceholderText("delete, format, send, transfer, ...")
+        body.addWidget(self.danger_words_edit)
+
         # Reset position
         reset_btn = QPushButton("Reset Window to Corner")
         reset_btn.setObjectName("reset_btn")
@@ -303,6 +328,9 @@ class SettingsDialog(QDialog):
             self.model_combo.setCurrentIndex(idx)
         self.max_steps_spin.setValue(int(self.settings.value("desktop_max_steps", 60)))
         self.repo_edit.setText(self.settings.value("github_repo", "") or "")
+        self.browser_dir_edit.setText(self.settings.value("browser_user_data_dir", "") or "")
+        self.approvals_cb.setChecked(self.settings.value("approvals_enabled", True, type=bool))
+        self.danger_words_edit.setText(self.settings.value("desktop_danger_words", "") or "")
 
     def _save(self):
         self.settings.setValue("always_on_top", self.aot_cb.isChecked())
@@ -314,6 +342,9 @@ class SettingsDialog(QDialog):
         self.settings.setValue("model", self.model_combo.currentData())
         self.settings.setValue("desktop_max_steps", self.max_steps_spin.value())
         self.settings.setValue("github_repo", self.repo_edit.text().strip())
+        self.settings.setValue("browser_user_data_dir", self.browser_dir_edit.text().strip())
+        self.settings.setValue("approvals_enabled", self.approvals_cb.isChecked())
+        self.settings.setValue("desktop_danger_words", self.danger_words_edit.text().strip())
 
         if self.parent():
             self.parent().set_always_on_top(self.aot_cb.isChecked())
