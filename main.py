@@ -4,6 +4,11 @@ import os
 import urllib.request
 import urllib.error
 from datetime import datetime
+from pathlib import Path
+
+# Project root -- used to locate bundled assets (icon.ico) regardless of cwd.
+_HERE = Path(__file__).resolve().parent
+_ICON_PATH = _HERE / "icon.ico"
 
 __version__ = "1.0.0"
 from PyQt5.QtWidgets import (
@@ -253,6 +258,9 @@ class MainWindow(QWidget):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMinimumSize(440, 560)
+        # Window/taskbar icon. Tray icon is generated dynamically in _build_tray.
+        if _ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(_ICON_PATH)))
 
         self._build_ui()
         self._build_tray()
@@ -528,6 +536,13 @@ class MainWindow(QWidget):
     def set_mode(self, mode: str):
         if mode not in ("browser", "desktop"):
             mode = "browser"
+        # First time the user hands the AI control of the whole machine, show
+        # a one-time consent + safety warning. Suppressed forever after they
+        # acknowledge it (flagged via QSettings).
+        if mode == "desktop" and self.current_mode() != "desktop":
+            if not self._first_desktop_warning_shown():
+                if not self._show_desktop_warning():
+                    return  # user backed out -- stay in browser mode
         self.settings.setValue("mode", mode)
         self.header.set_mode(mode)
         # Keep the tray action group in sync if it exists yet.
@@ -539,10 +554,40 @@ class MainWindow(QWidget):
         else:
             self.task_input.setPlaceholderText("Browser task — e.g. \"Search for the iPhone 17 release date\"")
 
+    def _first_desktop_warning_shown(self) -> bool:
+        return bool(self.settings.value("desktop_warning_seen", False, type=bool))
+
+    def _show_desktop_warning(self) -> bool:
+        """Return True if the user accepted, False if they cancelled."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Switching to Desktop Mode")
+        box.setText("Worker Buddy will move your real mouse and type on your real keyboard.")
+        box.setInformativeText(
+            "It can click, type, scroll, and switch windows in any program -- the same as if "
+            "you were doing it yourself. Things to know:\n\n"
+            "  -  Slam the mouse cursor into any screen corner to abort instantly (PyAutoGUI failsafe).\n"
+            "  -  The Stop button in the chat also cancels cooperatively.\n"
+            "  -  Only Sonnet 4.5 / 3.7 / 3.5-v2 support desktop mode; other models fall back automatically.\n"
+            "  -  Don't leave it unattended on a destructive task (sending email, deleting files, etc.).\n\n"
+            "Continue?"
+        )
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Cancel)
+        choice = box.exec_()
+        if choice == QMessageBox.Yes:
+            self.settings.setValue("desktop_warning_seen", True)
+            return True
+        return False
+
     def toggle_mode(self):
         new = "desktop" if self.current_mode() == "browser" else "browser"
         self.set_mode(new)
-        self._bubble("status", f"Mode: {new.upper()}")
+        # Status line only confirms when the mode actually changed (the warning
+        # may have been declined, leaving us in browser mode).
+        actual = self.current_mode()
+        if actual == new:
+            self._bubble("status", f"Mode: {actual.upper()}")
 
     # ── Tray ──────────────────────────────────────────────────────────────────
     def _build_tray(self):
@@ -721,15 +766,28 @@ class MainWindow(QWidget):
         if attachments:
             full_task += "\n\nAttached files:\n" + "\n".join(attachments)
 
-        creds_path = self.settings.value(
-            "creds_path", r"C:\JSON Credentials\QB_WC_credentials.json"
-        )
-        try:
-            with open(creds_path) as f:
-                creds   = json.load(f)
-            api_key = creds["anthropic_key"]
-        except Exception as e:
-            self._bubble("agent", f"Could not load credentials: {e}")
+        # API key resolution, in order of preference:
+        # 1. ANTHROPIC_API_KEY env var (handy for one-off launches / CI)
+        # 2. Credentials JSON path (the typical install)
+        # Settings dialog's "Credentials file" field still controls #2.
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            creds_path = self.settings.value(
+                "creds_path", r"C:\JSON Credentials\QB_WC_credentials.json"
+            )
+            try:
+                with open(creds_path) as f:
+                    creds = json.load(f)
+                api_key = creds.get("anthropic_key", "")
+            except Exception as e:
+                self._bubble("agent",
+                    f"Could not load Anthropic key. Set ANTHROPIC_API_KEY or fix the "
+                    f"credentials file in Settings.\nDetail: {e}")
+                return
+        if not api_key:
+            self._bubble("agent",
+                "No Anthropic key found. Set ANTHROPIC_API_KEY or put it in your "
+                "credentials JSON as `anthropic_key`.")
             return
 
         model        = self.settings.value("model", "claude-sonnet-4-5-20250929")
@@ -857,6 +915,16 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setFont(QFont("Segoe UI", 13))
+    if _ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(_ICON_PATH)))
+    # Windows taskbar groups by AppUserModelID. Setting our own keeps WB
+    # separate from "Generic Python" in the taskbar and uses our icon.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LynnCove.WorkerBuddy")
+        except Exception:
+            pass
 
     win = MainWindow()
     win.show()

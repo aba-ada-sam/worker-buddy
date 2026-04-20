@@ -258,6 +258,14 @@ class SettingsDialog(QDialog):
         steps_row.addWidget(steps_hint, 1)
         body.addLayout(steps_row)
 
+        # GitHub repo (for the tray "Check for Update" action)
+        repo_lbl = QLabel("GitHub repo for updates  (owner/repo)")
+        repo_lbl.setStyleSheet(f"color: {TEXT_DIM}; background: none; border: none;")
+        body.addWidget(repo_lbl)
+        self.repo_edit = QLineEdit()
+        self.repo_edit.setPlaceholderText("e.g. aba-ada-sam/worker-buddy")
+        body.addWidget(self.repo_edit)
+
         # Reset position
         reset_btn = QPushButton("Reset Window to Corner")
         reset_btn.setObjectName("reset_btn")
@@ -294,6 +302,7 @@ class SettingsDialog(QDialog):
         if idx >= 0:
             self.model_combo.setCurrentIndex(idx)
         self.max_steps_spin.setValue(int(self.settings.value("desktop_max_steps", 60)))
+        self.repo_edit.setText(self.settings.value("github_repo", "") or "")
 
     def _save(self):
         self.settings.setValue("always_on_top", self.aot_cb.isChecked())
@@ -304,6 +313,7 @@ class SettingsDialog(QDialog):
             self.settings.setValue("creds_path", creds)
         self.settings.setValue("model", self.model_combo.currentData())
         self.settings.setValue("desktop_max_steps", self.max_steps_spin.value())
+        self.settings.setValue("github_repo", self.repo_edit.text().strip())
 
         if self.parent():
             self.parent().set_always_on_top(self.aot_cb.isChecked())

@@ -1,12 +1,14 @@
 # UI
 PyQt5
 
-# LLM
+# LLM (anthropic SDK is used directly by desktop_mode; both modes use this key)
 anthropic
-langchain-anthropic
 
-# Browser mode
+# Browser mode -- browser-use 0.12+ uses ChatLiteLLM under the hood, which
+# needs litellm installed alongside it. Without litellm the browser agent
+# fails every step with "No module named 'litellm'" and bails.
 browser-use
+litellm
 playwright
 
 # Desktop mode

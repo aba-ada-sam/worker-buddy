@@ -43,6 +43,13 @@ async def _heartbeat(stop_event: asyncio.Event, log_fn: Callable[[str], None]):
 def _build_llm(model: str, api_key: str):
     """Return a browser-use BaseChatModel bound to the Anthropic API."""
     from browser_use.llm.litellm import ChatLiteLLM
+    # LiteLLM prints a "Give Feedback / Get Help" banner on every request by
+    # default. Silence it -- our log_fn already surfaces step-level progress.
+    try:
+        import litellm
+        litellm.suppress_debug_info = True
+    except Exception:
+        pass
     # LiteLLM expects a provider-prefixed model id ("anthropic/...") so it
     # knows which backend to hit. The model id we get is already the raw
     # Anthropic id (e.g. claude-sonnet-4-5-20250929).
