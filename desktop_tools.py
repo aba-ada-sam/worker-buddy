@@ -116,8 +116,9 @@ def click(x: int, y: int, *, button: str = "left", clicks: int = 1) -> dict:
     cx, cy = _clamp_to_screen(x, y)
     if button not in ("left", "right", "middle"):
         return {"ok": False, "error": f"unknown button: {button!r}"}
-    pyautogui.click(cx, cy, clicks=int(clicks), button=button)
-    return {"ok": True, "x": cx, "y": cy, "button": button, "clicks": int(clicks)}
+    n = max(1, min(MAX_CLICKS, int(clicks)))
+    pyautogui.click(cx, cy, clicks=n, button=button)
+    return {"ok": True, "x": cx, "y": cy, "button": button, "clicks": n}
 
 
 def double_click(x: int, y: int) -> dict:
@@ -185,7 +186,7 @@ def scroll(x: int, y: int, *, direction: str = "down", clicks: int = 3) -> dict:
     """Scroll at a given point. direction: up | down | left | right."""
     cx, cy = _clamp_to_screen(x, y)
     pyautogui.moveTo(cx, cy)
-    n = int(clicks)
+    n = max(0, min(MAX_SCROLL_CLICKS, int(clicks)))
     if direction in ("down", "south"):
         pyautogui.scroll(-n)
     elif direction in ("up", "north"):
@@ -204,8 +205,15 @@ def cursor_position() -> dict:
     return {"x": int(x), "y": int(y)}
 
 
+# Upper bounds on model/MCP-supplied values. A single huge wait would block the
+# worker thread past any cooperative stop; a huge click count would hammer the UI.
+MAX_WAIT_SECONDS = 30.0
+MAX_CLICKS = 5
+MAX_SCROLL_CLICKS = 100
+
+
 def wait(seconds: float) -> dict:
-    s = max(0.0, float(seconds))
+    s = min(MAX_WAIT_SECONDS, max(0.0, float(seconds)))
     time.sleep(s)
     return {"ok": True, "waited": s}
 
