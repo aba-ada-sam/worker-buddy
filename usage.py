@@ -14,6 +14,7 @@ plain input.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -96,22 +97,46 @@ def _ledger_path() -> Path:
     return Path(__file__).resolve().parent / "logs" / "usage_ledger.json"
 
 
+def _blank_ledger() -> dict:
+    return {"by_day": {}, "lifetime": {"input": 0, "output": 0, "cache_w": 0, "cache_r": 0, "cost_usd": 0.0, "tasks": 0}}
+
+
 def _load_ledger() -> dict:
     p = _ledger_path()
     if not p.exists():
-        return {"by_day": {}, "lifetime": {"input": 0, "output": 0, "cache_w": 0, "cache_r": 0, "cost_usd": 0.0, "tasks": 0}}
+        return _blank_ledger()
     try:
         with _lock:
-            return json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("ledger is not an object")
     except Exception:
-        return {"by_day": {}, "lifetime": {"input": 0, "output": 0, "cache_w": 0, "cache_r": 0, "cost_usd": 0.0, "tasks": 0}}
+        # Keep the unreadable file for recovery instead of silently
+        # overwriting a lifetime of history with zeros on the next save.
+        try:
+            p.replace(p.with_name(p.name + ".corrupt"))
+        except OSError:
+            pass
+        return _blank_ledger()
+    # Fill any keys a partial/hand-edited file lacks so record()/rollup_summary()
+    # cannot KeyError.
+    blank = _blank_ledger()
+    if not isinstance(data.get("by_day"), dict):
+        data["by_day"] = {}
+    if not isinstance(data.get("lifetime"), dict):
+        data["lifetime"] = {}
+    for k, v in blank["lifetime"].items():
+        data["lifetime"].setdefault(k, v)
+    return data
 
 
 def _save_ledger(data: dict) -> None:
     p = _ledger_path()
     p.parent.mkdir(exist_ok=True)
     with _lock:
-        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, p)    # atomic: a crash can't leave a truncated ledger
 
 
 def record(task: TaskUsage) -> None:
