@@ -85,16 +85,29 @@ def supports_computer_use(model: str) -> bool:
     return model in COMPUTER_USE_MODELS
 
 
-def _action_summary(tu_input: dict) -> str:
+def _action_summary(tu_input: dict, matched: str | None = None) -> str:
     """Compact human-readable summary of a `computer` tool_use input -- used
-    as the message body in the approval dialog and the danger-word scan."""
+    as the message body in the approval dialog and the danger-word scan.
+
+    Long text is truncated to 80 chars, but if `matched` (the danger word that
+    triggered the prompt) sits beyond that, the dialog also shows the text
+    around it. Otherwise the user would be asked to approve a payload whose
+    dangerous part is hidden, e.g. 80 chars of padding then "rm -rf ~".
+    """
     action = tu_input.get("action", "?")
     bits = [action]
     if tu_input.get("coordinate"):
         bits.append(f"@ {tuple(tu_input['coordinate'])}")
     text = tu_input.get("text")
     if text is not None:
-        bits.append(repr(str(text)[:80]))
+        text = str(text)
+        bits.append(repr(text[:80]))
+        if len(text) > 80:
+            bits.append(f"[{len(text)} chars total]")
+            idx = text.lower().find(matched.lower()) if matched else -1
+            if idx >= 60:
+                lo = max(80, idx - 20)
+                bits.append("... " + repr(text[lo:idx + len(matched) + 40]) + " ...")
     return " ".join(bits)
 
 
@@ -103,7 +116,7 @@ def _looks_dangerous(action: str, tu_input: dict, danger_words: tuple) -> str | 
     else None. Only `type` and `key` actions can carry payloads we'd worry
     about; clicks/scrolls/screenshots are inherently safe to perform.
     """
-    if action not in ("type", "key"):
+    if action not in ("type", "key", "hold_key"):
         return None
     text = (tu_input.get("text") or "").lower()
     if not text:
@@ -461,7 +474,7 @@ def run_desktop_task(
                     if approval_callback is not None:
                         triggered = _looks_dangerous(action, tu_input, danger_words)
                         if triggered:
-                            summary = _action_summary(tu_input)
+                            summary = _action_summary(tu_input, triggered)
                             log_fn(f"   ?  approval needed (matched {triggered!r}): {summary}")
                             if not approval_callback(
                                 f"Worker Buddy wants to run a potentially destructive action:\n\n"
