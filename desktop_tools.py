@@ -137,8 +137,23 @@ def left_click_drag(x1: int, y1: int, x2: int, y2: int, *, duration: float = 0.4
     return {"ok": True, "from": [sx, sy], "to": [ex, ey]}
 
 
+def untypable_chars(text: str) -> list[str]:
+    """Characters pyautogui.typewrite() cannot send (anything outside printable
+    ASCII plus newline/tab). typewrite() silently skips them, which would turn
+    e.g. a name with an accent into a different, wrong string."""
+    return sorted({c for c in text if not (" " <= c <= "~" or c in "\n\r\t")})
+
+
 def type_text(text: str, *, interval: float = 0.01) -> dict:
-    """Type literal text. Use press_key() for non-printable keys."""
+    """Type literal text. Use press_key() for non-printable keys.
+
+    Refuses (types nothing) if the text has characters that cannot be typed,
+    instead of reporting success after silently dropping them."""
+    text = str(text)
+    bad = untypable_chars(text)
+    if bad:
+        return {"ok": False, "chars": 0,
+                "error": "cannot type non-ASCII characters %r; nothing was typed" % "".join(bad[:10])}
     pyautogui.typewrite(text, interval=interval)
     return {"ok": True, "chars": len(text)}
 
