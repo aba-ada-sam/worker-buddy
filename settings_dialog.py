@@ -326,7 +326,8 @@ class SettingsDialog(QDialog):
         idx = self.model_combo.findData(model)
         if idx >= 0:
             self.model_combo.setCurrentIndex(idx)
-        self.max_steps_spin.setValue(int(self.settings.value("desktop_max_steps", 60)))
+        from creds import safe_int
+        self.max_steps_spin.setValue(safe_int(self.settings.value("desktop_max_steps", 60), 60, 5, 300))
         self.repo_edit.setText(self.settings.value("github_repo", "") or "")
         self.browser_dir_edit.setText(self.settings.value("browser_user_data_dir", "") or "")
         self.approvals_cb.setChecked(self.settings.value("approvals_enabled", True, type=bool))

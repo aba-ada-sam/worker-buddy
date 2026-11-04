@@ -316,16 +316,14 @@ def browser_task_stop(job_id: str) -> dict:
 
 
 def _load_anthropic_key() -> str:
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return os.environ["ANTHROPIC_API_KEY"]
-    creds = Path(r"C:\JSON Credentials\QB_WC_credentials.json")
-    if creds.exists():
-        try:
-            data = json.loads(creds.read_text(encoding="utf-8"))
-            return data.get("anthropic_key", "")
-        except Exception as e:
-            log.warning("could not read creds: %s", e)
-    return ""
+    from creds import load_anthropic_key
+    try:
+        return load_anthropic_key()
+    except FileNotFoundError:
+        return ""
+    except Exception as e:
+        log.warning("could not read creds: %s", e)
+        return ""
 
 
 if __name__ == "__main__":
