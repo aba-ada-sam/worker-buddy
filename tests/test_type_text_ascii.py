@@ -23,12 +23,8 @@ import desktop_tools as dt  # noqa: E402
 
 def test_non_ascii_is_refused_and_nothing_typed():
     typed = []
-    orig = dt.pyautogui.typewrite
-    dt.pyautogui.typewrite = lambda t, interval=0: typed.append(t)
-    try:
+    with mock.patch.object(dt.pyautogui, "typewrite", lambda t, interval=0: typed.append(t), create=True):
         res = dt.type_text("José – café")
-    finally:
-        dt.pyautogui.typewrite = orig
     assert res["ok"] is False and res["chars"] == 0
     assert typed == []
 
