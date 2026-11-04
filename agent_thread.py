@@ -72,16 +72,23 @@ class AgentThread(QThread):
         self.approval_request.emit(message, setter)
         # Hard cap so a forgotten dialog doesn't wedge us forever. 5 min is
         # generous enough for thoughtful approval; treats timeout as decline.
-        evt.wait(timeout=300)
+        # Poll in short slices so a Stop click is honoured immediately instead
+        # of leaving the worker parked for the full 5 minutes; stop == decline.
+        waited = 0.0
+        while not evt.wait(timeout=0.25):
+            waited += 0.25
+            if self._stop_requested or waited >= 300:
+                return False
         return result["ok"]
 
     def run(self) -> None:
         log = self.log_line.emit
+        outcome = None
         approval_cb = self._ask_for_approval if self.approvals_enabled else None
         try:
             if self.mode == "desktop":
                 from modes.desktop_mode import run_desktop_task, DEFAULT_DANGER_WORDS
-                run_desktop_task(
+                outcome = run_desktop_task(
                     task=self.task,
                     api_key=self.api_key,
                     model=self.model,
@@ -105,6 +112,9 @@ class AgentThread(QThread):
                     user_data_dir=self.browser_user_data_dir,
                 )
         except Exception as e:
+            # Tokens were spent even though the task failed; keep the ledger honest.
+            if self._usage.api_calls:
+                self.usage_ready.emit(self._usage)
             # Agent errors (API 4xx/5xx, network hiccups, tool crashes) bubble
             # up as exceptions. A stop mid-flight may also raise, so prefer
             # "stopped" classification when the user asked for it.
@@ -118,5 +128,9 @@ class AgentThread(QThread):
         self.usage_ready.emit(self._usage)
         if self._stop_requested:
             self.finished.emit("stopped")
+        elif isinstance(outcome, str) and outcome.startswith("incomplete"):
+            # run_desktop_task returns (not raises) when max_steps runs out;
+            # reporting that as "done" told the user a half-finished task succeeded.
+            self.finished.emit(f"error: {outcome}")
         else:
             self.finished.emit("done")
