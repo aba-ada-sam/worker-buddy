@@ -56,3 +56,27 @@ def test_cost_unknown_model_uses_fallback_price():
     t = usage.TaskUsage(model="mystery")
     t.add(input_tokens=1_000_000)
     assert abs(t.cost_usd() - 3.0) < 1e-9
+
+
+def test_partial_day_row_does_not_keyerror_on_record_or_rollup():
+    from datetime import date
+    today = date.today().isoformat()
+    with tempfile.TemporaryDirectory() as d, _with_ledger(d):
+        (Path(d) / "usage_ledger.json").write_text(
+            json.dumps({"by_day": {today: {"tasks": 1}, "2020-01-01": "junk"},
+                        "lifetime": {"tasks": 1, "cost_usd": "x"}}), encoding="utf-8")
+        usage.record(_task())
+        data = json.loads((Path(d) / "usage_ledger.json").read_text())
+        assert data["by_day"][today]["tasks"] == 2
+        assert data["by_day"][today]["input"] == 1000
+        assert data["lifetime"]["tasks"] == 2
+        assert "Today:" in usage.rollup_summary()
+
+
+def test_concurrent_records_do_not_lose_updates():
+    import threading
+    with tempfile.TemporaryDirectory() as d, _with_ledger(d):
+        ts = [threading.Thread(target=lambda: usage.record(_task())) for _ in range(8)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        assert json.loads((Path(d) / "usage_ledger.json").read_text())["lifetime"]["tasks"] == 8

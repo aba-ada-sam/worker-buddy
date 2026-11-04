@@ -91,6 +91,9 @@ class TaskUsage:
 # ── Persistent rollup -- "today / this month / lifetime" ─────────────────────
 
 _lock = threading.Lock()
+# Serialises the whole load-modify-save in record(); _lock only guards single
+# file operations, so two finishing tasks could otherwise lose an update.
+_record_lock = threading.Lock()
 
 
 def _ledger_path() -> Path:
@@ -119,14 +122,23 @@ def _load_ledger() -> dict:
             pass
         return _blank_ledger()
     # Fill any keys a partial/hand-edited file lacks so record()/rollup_summary()
-    # cannot KeyError.
+    # cannot KeyError. Per-day rows need the same treatment as "lifetime".
     blank = _blank_ledger()
     if not isinstance(data.get("by_day"), dict):
         data["by_day"] = {}
     if not isinstance(data.get("lifetime"), dict):
         data["lifetime"] = {}
     for k, v in blank["lifetime"].items():
-        data["lifetime"].setdefault(k, v)
+        if not isinstance(data["lifetime"].get(k), (int, float)) or isinstance(data["lifetime"].get(k), bool):
+            data["lifetime"][k] = v
+    for day_key in list(data["by_day"]):
+        row = data["by_day"][day_key]
+        if not isinstance(row, dict):
+            row = {}
+        for k, v in blank["lifetime"].items():
+            if not isinstance(row.get(k), (int, float)) or isinstance(row.get(k), bool):
+                row[k] = v
+        data["by_day"][day_key] = row
     return data
 
 
@@ -143,6 +155,11 @@ def record(task: TaskUsage) -> None:
     """Roll a finished task's usage into the persistent ledger."""
     if task.api_calls == 0:
         return
+    with _record_lock:
+        _record_locked(task)
+
+
+def _record_locked(task: TaskUsage) -> None:
     today = date.today().isoformat()
     cost = task.cost_usd()
     data = _load_ledger()
