@@ -824,20 +824,15 @@ class MainWindow(QWidget):
         # 1. ANTHROPIC_API_KEY env var (handy for one-off launches / CI)
         # 2. Credentials JSON path (the typical install)
         # Settings dialog's "Credentials file" field still controls #2.
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        if not api_key:
-            creds_path = self.settings.value(
-                "creds_path", r"C:\JSON Credentials\QB_WC_credentials.json"
-            )
-            try:
-                with open(creds_path) as f:
-                    creds = json.load(f)
-                api_key = creds.get("anthropic_key", "")
-            except Exception as e:
-                self._bubble("agent",
-                    f"Could not load Anthropic key. Set ANTHROPIC_API_KEY or fix the "
-                    f"credentials file in Settings.\nDetail: {e}")
-                return
+        try:
+            from creds import load_anthropic_key, DEFAULT_CREDS_PATH
+            api_key = load_anthropic_key(
+                self.settings.value("creds_path", DEFAULT_CREDS_PATH) or DEFAULT_CREDS_PATH)
+        except Exception as e:
+            self._bubble("agent",
+                f"Could not load Anthropic key. Set ANTHROPIC_API_KEY or fix the "
+                f"credentials file in Settings.\nDetail: {e}")
+            return
         if not api_key:
             self._bubble("agent",
                 "No Anthropic key found. Set ANTHROPIC_API_KEY or put it in your "
@@ -847,7 +842,8 @@ class MainWindow(QWidget):
         model        = self.settings.value("model", "claude-sonnet-4-5-20250929")
         show_browser = self.settings.value("show_browser", True, type=bool)
         mode         = self.settings.value("mode", "browser")  # "browser" | "desktop"
-        max_steps    = int(self.settings.value("desktop_max_steps", 60))
+        from creds import safe_int
+        max_steps    = safe_int(self.settings.value("desktop_max_steps", 60), 60)
         approvals    = self.settings.value("approvals_enabled", True, type=bool)
         # Default to a per-project profile so logins persist between tasks.
         default_profile = str(_HERE / "browser_profile")
